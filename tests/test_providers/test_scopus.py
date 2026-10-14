@@ -55,6 +55,51 @@ def test_scopus_provider_has_detail_helpers():
     assert hasattr(ScopusProvider, "get_quota_status")
 
 
+async def test_search_sends_start_for_pagination():
+    captured = {}
+
+    def handler(request):
+        captured["start"] = request.url.params.get("start")
+        return httpx.Response(200, json={"search-results": {"entry": []}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ScopusProvider(client, {"api_key": "test-key"})
+    try:
+        await provider.search("networks", 10, offset=20)
+        assert captured["start"] == "20"
+    finally:
+        await client.aclose()
+
+
+async def test_abstract_endpoint_collects_all_authors():
+    # The abstracts-retrieval endpoint exposes a full author array; every
+    # co-author must survive, not just the first (dc:creator).
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "abstracts-retrieval-response": {
+                    "coredata": {
+                        "dc:title": "X",
+                        "prism:doi": "10.1/x",
+                        "author": [
+                            {"authname": "Sepp Hochreiter"},
+                            {"authname": "Jürgen Schmidhuber"},
+                        ],
+                    }
+                }
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ScopusProvider(client, {"api_key": "test-key"})
+    try:
+        paper = await provider.get("10.1/x")
+        assert paper.authors == ["Sepp Hochreiter", "Jürgen Schmidhuber"]
+    finally:
+        await client.aclose()
+
+
 async def test_get_routes_doi_to_doi_endpoint():
     captured = {}
 
@@ -140,5 +185,21 @@ async def test_citations_uses_scopus_id_for_ref_query():
     try:
         await provider.citations("SCOPUS_ID:85012345678", 5)
         assert captured["query"] == "REF(85012345678)"
+    finally:
+        await client.aclose()
+
+
+async def test_search_author_uses_au_clause():
+    captured = {}
+
+    def handler(request):
+        captured["query"] = request.url.params.get("query")
+        return httpx.Response(200, json={"search-results": {"entry": []}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ScopusProvider(client, {"api_key": "test-key"})
+    try:
+        await provider.search_author("Vaswani", 5)
+        assert captured["query"] == "AU(Vaswani)"
     finally:
         await client.aclose()

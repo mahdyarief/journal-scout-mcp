@@ -143,3 +143,19 @@ async def test_get_extracts_id_from_arxiv_prefixed_identifier():
         assert captured["id_list"] == "1706.03762"
     finally:
         await client.aclose()
+
+
+async def test_search_sends_start_for_pagination():
+    captured = {}
+
+    def handler(request):
+        captured["start"] = request.url.params.get("start")
+        return httpx.Response(200, text=(FIXTURES / "arxiv_search.xml").read_text(encoding="utf-8"))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ArxivProvider(client)
+    try:
+        await provider.search("transformers", 10, offset=30)
+        assert captured["start"] == "30"
+    finally:
+        await client.aclose()

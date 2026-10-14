@@ -256,3 +256,19 @@ async def test_citations_returns_empty_for_unknown_identifier_without_request():
         assert calls == []
     finally:
         await client.aclose()
+
+
+async def test_search_sends_offset_for_pagination():
+    captured = {}
+
+    def handler(request):
+        captured["offset"] = request.url.params.get("offset")
+        return httpx.Response(200, json={"data": []})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = SemanticScholarProvider(client)
+    try:
+        await provider.search("attention", 10, offset=25)
+        assert captured["offset"] == "25"
+    finally:
+        await client.aclose()

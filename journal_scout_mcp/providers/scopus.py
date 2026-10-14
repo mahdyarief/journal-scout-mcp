@@ -2,23 +2,20 @@ from typing import Any, Dict, List, Optional
 
 from ..config import get_api_key
 from ..models import Paper
-from ..utils import normalize_doi
+from ..utils import normalize_doi, parse_int, parse_year
 from .base import ProviderBase
 
 SCOPUS_BASE = "https://api.elsevier.com/content/"
 SCIVAL_BASE = "https://api.elsevier.com/analytics/scival/"
 _SCOPUS_ID_PREFIX = "SCOPUS_ID:"
-
-
-def _year_from_date(value: str) -> Optional[int]:
-    if value and len(value) >= 4 and value[:4].isdigit():
-        return int(value[:4])
-    return None
+SCIVAL_METRIC_TYPES = "publications,citations,hIndex"
 
 
 class ScopusProvider(ProviderBase):
     name = "scopus"
     supports_search = True
+    supports_citations = True
+    supports_author_search = True
 
     def __init__(self, fetcher, config=None):
         super().__init__(fetcher, config)
@@ -32,13 +29,35 @@ class ScopusProvider(ProviderBase):
         }
 
     @staticmethod
+    def _authors(entry) -> List[str]:
+        """Collect every author Scopus exposes.
+
+        Search results only carry ``dc:creator`` (first author) while the
+        abstract-retrieval endpoint returns the full ``author`` array; read
+        whichever is present instead of silently dropping co-authors.
+        """
+        names: List[str] = []
+        raw = entry.get("author") or []
+        if isinstance(raw, dict):
+            raw = [raw]
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("authname") or " ".join(
+                part for part in [item.get("given-name"), item.get("surname")] if part
+            )
+            if name:
+                names.append(name)
+        if not names:
+            creator = entry.get("dc:creator")
+            if creator:
+                names.append(creator)
+        return names
+
+    @staticmethod
     def _to_paper(entry):
         scopus_id = entry.get("dc:identifier") or entry.get("eid")
         doi = normalize_doi(entry.get("prism:doi") or entry.get("doi"))
-        creator = entry.get("dc:creator")
-        authors = [creator] if creator else []
-        year = _year_from_date(entry.get("prism:coverDate") or entry.get("prism:coverDisplayDate") or "")
-        cited = entry.get("citedby-count")
         ids = {}
         if scopus_id:
             ids["scopus"] = scopus_id
@@ -48,35 +67,49 @@ class ScopusProvider(ProviderBase):
             doi=doi,
             title=entry.get("dc:title") or "",
             abstract=entry.get("dc:description"),
-            year=year,
-            authors=authors,
+            year=parse_year(entry.get("prism:coverDate") or entry.get("prism:coverDisplayDate")),
+            authors=ScopusProvider._authors(entry),
             venue=entry.get("prism:publicationName"),
-            citation_count=int(cited) if cited is not None and str(cited).isdigit() else None,
+            citation_count=parse_int(entry.get("citedby-count")),
             url=entry.get("prism:url") or entry.get("link"),
             type=entry.get("subtypeDescription"),
             sources=["scopus"],
             ids=ids,
         )
 
-    async def search(self, query: str, limit: int, year_from=None, year_to=None, tech_only=False) -> List[Paper]:
-        q = query
-        if tech_only:
-            q = f"({q}) AND SUBJAREA(COMP)"
+    @staticmethod
+    def _year_clause(query: str, year_from, year_to) -> str:
+        """Append Scopus PUBYEAR bounds to a query (shared by every search)."""
         if year_from:
-            q = f"{q} AND PUBYEAR > {year_from - 1}"
+            query = f"{query} AND PUBYEAR > {year_from - 1}"
         if year_to:
-            q = f"{q} AND PUBYEAR < {year_to + 1}"
-        params = {"query": q, "count": limit}
+            query = f"{query} AND PUBYEAR < {year_to + 1}"
+        return query
+
+    async def _search_query(self, query: str, limit: int, offset: int) -> List[Paper]:
+        params = {"query": query, "count": limit, "start": offset}
         data = await self._fetch_json(
             f"{SCOPUS_BASE}search/scopus", params=params, headers=self._headers()
         )
+        return self._entries_to_papers(data)
+
+    async def search(self, query: str, limit: int, year_from=None, year_to=None, tech_only=False, offset: int = 0) -> List[Paper]:
+        if tech_only:
+            query = f"({query}) AND SUBJAREA(COMP)"
+        return await self._search_query(self._year_clause(query, year_from, year_to), limit, offset)
+
+    async def search_author(self, author: str, limit: int, year_from=None, year_to=None, offset: int = 0) -> List[Paper]:
+        query = self._year_clause(f"AU({author})", year_from, year_to)
+        return await self._search_query(query, limit, offset)
+
+    @staticmethod
+    def _entries_to_papers(data) -> List[Paper]:
         entries = (data.get("search-results") or {}).get("entry") or []
-        results = []
-        for entry in entries:
-            if isinstance(entry, dict) and "error" in entry:
-                continue
-            results.append(self._to_paper(entry))
-        return results
+        return [
+            ScopusProvider._to_paper(e)
+            for e in entries
+            if isinstance(e, dict) and "error" not in e
+        ]
 
     @staticmethod
     def _scopus_id(identifier: str) -> str:
@@ -112,27 +145,28 @@ class ScopusProvider(ProviderBase):
             params={"query": f"REF({sid})", "count": limit},
             headers=self._headers(),
         )
-        entries = (data.get("search-results") or {}).get("entry") or []
-        return [self._to_paper(e) for e in entries if isinstance(e, dict) and "error" not in e]
+        return self._entries_to_papers(data)
 
-    async def scival_author_metrics(self, author_id: str, year_from=None, year_to=None) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"metricTypes": "publications,citations,hIndex"}
+    def _scival_metric_params(self, year_from=None, year_to=None, metric_types: str = SCIVAL_METRIC_TYPES) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"metricTypes": metric_types}
         if year_from:
             params["startYear"] = year_from
         if year_to:
             params["endYear"] = year_to
+        return params
+
+    async def scival_author_metrics(self, author_id: str, year_from=None, year_to=None) -> Dict[str, Any]:
         return await self._fetch_json(
-            f"{SCIVAL_BASE}author/{author_id}/metrics", params=params, headers=self._headers()
+            f"{SCIVAL_BASE}author/{author_id}/metrics",
+            params=self._scival_metric_params(year_from, year_to),
+            headers=self._headers(),
         )
 
     async def scival_institution_metrics(self, institution_id: str, year_from=None, year_to=None) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"metricTypes": "publications,citations,hIndex"}
-        if year_from:
-            params["startYear"] = year_from
-        if year_to:
-            params["endYear"] = year_to
         return await self._fetch_json(
-            f"{SCIVAL_BASE}institution/{institution_id}/metrics", params=params, headers=self._headers()
+            f"{SCIVAL_BASE}institution/{institution_id}/metrics",
+            params=self._scival_metric_params(year_from, year_to),
+            headers=self._headers(),
         )
 
     async def scival_author_lookup(self, query: str, count: int = 10) -> Dict[str, Any]:
@@ -146,13 +180,10 @@ class ScopusProvider(ProviderBase):
         )
 
     async def scival_topic_metrics(self, topic_id: str, year_from=None, year_to=None) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"metricTypes": "publications,citations"}
-        if year_from:
-            params["startYear"] = year_from
-        if year_to:
-            params["endYear"] = year_to
         return await self._fetch_json(
-            f"{SCIVAL_BASE}topic/{topic_id}/metrics", params=params, headers=self._headers()
+            f"{SCIVAL_BASE}topic/{topic_id}/metrics",
+            params=self._scival_metric_params(year_from, year_to, "publications,citations"),
+            headers=self._headers(),
         )
 
     async def get_author(self, author_id: str) -> Dict[str, Any]:

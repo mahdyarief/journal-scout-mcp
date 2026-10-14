@@ -3,7 +3,7 @@ from typing import List, Optional
 
 from ..config import get_semantic_scholar_key
 from ..models import Paper
-from ..utils import normalize_doi
+from ..utils import normalize_doi, parse_year
 from .base import ProviderBase
 
 S2_URL = "https://api.semanticscholar.org/graph/v1"
@@ -19,6 +19,7 @@ _S2_PREFIXES = frozenset(
 class SemanticScholarProvider(ProviderBase):
     name = "semanticscholar"
     supports_search = True
+    supports_citations = True
 
     def _headers(self):
         key = get_semantic_scholar_key()
@@ -39,7 +40,7 @@ class SemanticScholarProvider(ProviderBase):
             doi=doi,
             title=item.get("title") or "",
             abstract=item.get("abstract") or (item.get("tldr") or {}).get("text"),
-            year=item.get("year"),
+            year=parse_year(item.get("year")),
             authors=authors,
             venue=item.get("venue") or None,
             citation_count=item.get("citationCount"),
@@ -75,8 +76,10 @@ class SemanticScholarProvider(ProviderBase):
             return value
         return None
 
-    async def search(self, query: str, limit: int, year_from=None, year_to=None, tech_only=False) -> List[Paper]:
+    async def search(self, query: str, limit: int, year_from=None, year_to=None, tech_only=False, offset: int = 0) -> List[Paper]:
         params = {"query": query, "limit": limit, "fields": FIELDS}
+        if offset:
+            params["offset"] = offset
         if year_from or year_to:
             lo = year_from or ""
             hi = year_to or ""

@@ -1,20 +1,33 @@
 import asyncio
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
+from .cache import TTLCache
 from .models import ProviderError
 
 MAX_BACKOFF_SECONDS = 60
 MIN_INTERVALS: Dict[str, float] = {"arxiv": 3.0, "semanticscholar": 1.0}
 MAX_RETRIES = 3
 
+# Sentinel distinguishing "caller said nothing" (use the default cache) from an
+# explicit ``cache=None`` (caching deliberately disabled, e.g. a TTL of zero).
+_CACHE_UNSET: Any = object()
+
 
 class Fetcher:
-    def __init__(self, client: Optional[httpx.AsyncClient] = None):
+    def __init__(
+        self,
+        client: Optional[httpx.AsyncClient] = None,
+        cache: Optional[TTLCache] = _CACHE_UNSET,
+    ):
         self.client = client or httpx.AsyncClient(timeout=30.0)
+        # A single cache is shared by every provider, so a repeated query
+        # against any source is served locally instead of burning the upstream
+        # quota. ``cache=None`` turns caching off entirely.
+        self.cache = TTLCache() if cache is _CACHE_UNSET else cache
         self._last_call: Dict[str, float] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
 
@@ -35,6 +48,12 @@ class Fetcher:
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last_call[provider] = time.monotonic()
+
+    def _cache_key(self, url, params, provider) -> Optional[Tuple]:
+        if self.cache is None:
+            return None
+        items = tuple(sorted((params or {}).items()))
+        return (provider, url, items)
 
     async def _request(self, url, params, headers, provider):
         backoff = 1.0
@@ -103,8 +122,8 @@ class Fetcher:
             provider or "unknown", f"Request failed after retries (last status={last_status})"
         )
 
-    async def get_json(self, url, params=None, headers=None, provider=None) -> Dict[str, Any]:
-        response = await self._request(url, params, headers, provider)
+    @staticmethod
+    def _parse_json(response, provider) -> Dict[str, Any]:
         try:
             return response.json()
         except json.JSONDecodeError as e:
@@ -119,9 +138,29 @@ class Fetcher:
                 provider or "unknown", f"Expected JSON but got: {body}"
             ) from e
 
-    async def get_text(self, url, params=None, headers=None, provider=None) -> str:
+    async def get_json(self, url, params=None, headers=None, provider=None) -> Dict[str, Any]:
+        key = self._cache_key(url, params, provider)
+        if key is not None:
+            cached = self.cache.get(key)
+            if cached is not None:
+                return cached
         response = await self._request(url, params, headers, provider)
-        return response.text
+        payload = self._parse_json(response, provider)
+        if key is not None:
+            self.cache.set(key, payload)
+        return payload
+
+    async def get_text(self, url, params=None, headers=None, provider=None) -> str:
+        key = self._cache_key(url, params, provider)
+        if key is not None:
+            cached = self.cache.get(key)
+            if cached is not None:
+                return cached
+        response = await self._request(url, params, headers, provider)
+        text = response.text
+        if key is not None:
+            self.cache.set(key, text)
+        return text
 
     async def close(self) -> None:
         await self.client.aclose()

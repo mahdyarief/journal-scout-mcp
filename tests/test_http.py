@@ -148,3 +148,57 @@ async def test_elsevier_quota_error_message():
         assert "quota" in str(exc.value).lower()
     finally:
         await f.close()
+
+
+async def test_repeated_query_is_served_from_cache_without_second_call():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json={"ok": True})
+
+    f = _fetcher(handler)
+    try:
+        first = await f.get_json("https://example.test/x", params={"q": "a"}, provider="crossref")
+        second = await f.get_json("https://example.test/x", params={"q": "a"}, provider="crossref")
+        assert first == second == {"ok": True}
+        # The upstream must be hit exactly once thanks to the cache.
+        assert calls["n"] == 1
+    finally:
+        await f.close()
+
+
+async def test_cache_is_keyed_by_params_and_provider():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json={"n": calls["n"]})
+
+    f = _fetcher(handler)
+    try:
+        await f.get_json("https://example.test/x", params={"q": "a"}, provider="crossref")
+        # Different params and a different provider are distinct cache keys.
+        await f.get_json("https://example.test/x", params={"q": "b"}, provider="crossref")
+        await f.get_json("https://example.test/x", params={"q": "a"}, provider="openalex")
+        assert calls["n"] == 3
+    finally:
+        await f.close()
+
+
+async def test_cache_disabled_when_none_still_works():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    f = Fetcher(client=client, cache=None)
+    try:
+        await f.get_json("https://example.test/x", provider="crossref")
+        await f.get_json("https://example.test/x", provider="crossref")
+        assert calls["n"] == 2
+    finally:
+        await f.close()

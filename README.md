@@ -10,14 +10,18 @@ verify* papers at scale (metadata, abstracts, open-access links, citation
 graphs), then drive a real browser (e.g. FastMCP Browser) only for the pages
 that block plain HTTP — WAFs, login walls, JS-heavy publishers.
 
-## Tools (17)
+## Tools (18)
 
-Unified: `search_all`, `get_paper`, `get_citations`.
+Unified: `search_all`, `search_author`, `get_paper`, `get_citations`.
 Per-source: `search_scopus`, `search_arxiv`, `search_openalex`,
 `search_semanticscholar`, `search_crossref`, `search_dblp`.
 Scopus detail: `get_abstract_details`, `get_author_profile`, `get_quota_status`.
 SciVal: `scival_author_metrics`, `scival_institution_metrics`,
 `scival_author_lookup`, `scival_institution_lookup`, `scival_topic_metrics`.
+
+Every search accepts `offset` for pagination (uses each API's native
+parameter), and `search_author` fans out to the author-search-capable
+sources (Scopus, Crossref, OpenAlex) then merges and dedupes the results.
 
 ## Requirements
 
@@ -44,19 +48,23 @@ Copy `config.json.example` to `config.json`:
 {
   "api_key": "YOUR_ELSEVIER_API_KEY",
   "semantic_scholar_api_key": "",
-  "polite_email": "you@example.com"
+  "polite_email": "you@example.com",
+  "cache_ttl": 300
 }
 ```
 
 Only the Elsevier `api_key` is required (Scopus/SciVal only). The other
 sources work without a key. `polite_email` improves rate limits on OpenAlex,
-Crossref, and Unpaywall.
+Crossref, and Unpaywall. `cache_ttl` (seconds, default `300`) serves repeated
+queries from an in-memory cache instead of re-hitting the upstream APIs;
+set it to `0` to disable caching.
 
 Environment variables override the file:
 
 - `SCOPUS_API_KEY` (or `api_key` in config.json)
 - `SEMANTIC_SCHOLAR_API_KEY`
 - `JOURNAL_SCOUT_EMAIL` (or `polite_email`)
+- `JOURNAL_SCOUT_CACHE_TTL` (or `cache_ttl`)
 
 `config.json` is intentionally git-ignored — never commit your real keys.
 
@@ -104,6 +112,8 @@ Point the client at the module:
 - Non-JSON (HTML bot-challenge) responses raise a `ProviderError` naming the
   provider and showing the HTML prefix, instead of a confusing JSON parse
   error.
+- A shared TTL cache short-circuits duplicate queries per provider, so
+  retries and repeated searches do not burn the (limited) upstream quota.
 
 ## Tests
 
@@ -111,7 +121,8 @@ Point the client at the module:
 .venv/bin/python -m pytest tests/ -q
 ```
 
-74 tests covering all providers, the HTTP retry layer, dedup/merge logic,
+111 tests covering all providers, the HTTP retry/cache layer, dedup/merge
+logic (DOI-first with title/author fallback), pagination, author search,
 and the server tool registry.
 
 ## License
