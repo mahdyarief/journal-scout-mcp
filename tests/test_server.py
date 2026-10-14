@@ -1,3 +1,5 @@
+import json
+
 from journal_scout_mcp.server import TOOL_NAMES, build_json
 from journal_scout_mcp.models import Paper
 from journal_scout_mcp.providers.base import ProviderBase
@@ -42,6 +44,38 @@ async def test_dispatch_per_source_search():
 async def test_dispatch_search_author():
     result = await build_json("search_author", {"author": "Vaswani"}, [AuthorProvider(None)], None)
     assert result["results"][0]["title"] == "By Vaswani"
+
+
+class AbstractDetailProvider(ProviderBase):
+    name = "scopus"
+
+    async def get(self, identifier: str):
+        return Paper(doi="10.1145/123", title="Fixture title", sources=["scopus"])
+
+
+class MissingAbstractProvider(ProviderBase):
+    name = "scopus"
+
+    async def get(self, identifier: str):
+        return None
+
+
+async def test_dispatch_get_abstract_details_returns_serializable_dict():
+    """Regression: this tool used to return a raw Paper and always errored."""
+    provider = AbstractDetailProvider(None)
+    result = await build_json("get_abstract_details", {"scopus_id": "7001234"}, [], provider)
+
+    assert result["paper"]["title"] == "Fixture title"
+    assert result["paper"]["doi"] == "10.1145/123"
+    json.dumps(result)
+
+
+async def test_dispatch_get_abstract_details_handles_missing_record():
+    provider = MissingAbstractProvider(None)
+    result = await build_json("get_abstract_details", {"scopus_id": "0"}, [], provider)
+
+    assert result == {"paper": None}
+    json.dumps(result)
 
 
 async def test_dispatch_unknown_tool_raises():

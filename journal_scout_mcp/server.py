@@ -6,7 +6,7 @@ import mcp.types as types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from . import aggregator, config
+from . import aggregator, config, prompts
 from .cache import build_cache
 from .http import Fetcher
 from .models import ProviderError
@@ -187,7 +187,10 @@ async def build_json(name: str, arguments: Dict[str, Any], providers, scopus_pro
             offset=arguments.get("offset", 0),
         )
     if name == "get_abstract_details":
-        return await scopus_provider.get(arguments["scopus_id"])
+        paper = await scopus_provider.get(arguments["scopus_id"])
+        # ``get`` returns a Paper, which is not JSON-serializable; the tool
+        # contract is a plain dict, so convert it here.
+        return {"paper": paper.to_dict() if paper else None}
     if name == "get_author_profile":
         return await scopus_provider.get_author(arguments["author_id"])
     if name == "get_quota_status":
@@ -242,11 +245,11 @@ def start() -> None:
 
         @server.list_prompts()
         async def _list_prompts() -> List[types.Prompt]:
-            return []
+            return prompts.list_prompts()
 
         @server.get_prompt()
         async def _get_prompt(name: str, arguments: Optional[Dict[str, Any]]) -> types.GetPromptResult:
-            raise ValueError(f"Unknown prompt: {name}")
+            return prompts.render_prompt(name, arguments)
 
         async with stdio_server() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())

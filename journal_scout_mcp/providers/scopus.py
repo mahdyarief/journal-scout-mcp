@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 from ..config import get_api_key
-from ..models import Paper
+from ..models import Paper, ProviderError
 from ..utils import normalize_doi, parse_int, parse_year
 from .base import ProviderBase
 
@@ -29,29 +29,50 @@ class ScopusProvider(ProviderBase):
         }
 
     @staticmethod
-    def _authors(entry) -> List[str]:
-        """Collect every author Scopus exposes.
+    def _author_name(item: Dict[str, Any]) -> str:
+        """Best display name for one Elsevier author entry.
 
-        Search results only carry ``dc:creator`` (first author) while the
-        abstract-retrieval endpoint returns the full ``author`` array; read
-        whichever is present instead of silently dropping co-authors.
+        Search results carry ``authname``/``given-name``/``surname`` while
+        abstract retrieval nests the names under ``ce:``-prefixed keys (or a
+        ``preferred-name`` sub-dict), so accept whichever shape is present.
         """
-        names: List[str] = []
-        raw = entry.get("author") or []
-        if isinstance(raw, dict):
-            raw = [raw]
-        for item in raw:
-            if not isinstance(item, dict):
+        if item.get("authname"):
+            return str(item["authname"])
+        for source in (item.get("preferred-name"), item):
+            if not isinstance(source, dict):
                 continue
-            name = item.get("authname") or " ".join(
-                part for part in [item.get("given-name"), item.get("surname")] if part
+            name = " ".join(
+                part for part in [source.get("ce:given-name"), source.get("ce:surname")] if part
             )
             if name:
+                return name
+        return " ".join(
+            part for part in [item.get("given-name"), item.get("surname")] if part
+        )
+
+    @staticmethod
+    def _authors(entry) -> List[str]:
+        """Collect every author Scopus exposes across both response views.
+
+        Search results carry only ``dc:creator`` as a plain string (first
+        author); abstract retrieval nests the full list under
+        ``dc:creator['author']`` with ``ce:``-prefixed names. Read whichever
+        is present instead of dropping co-authors or leaking the raw dict.
+        """
+        creator = entry.get("dc:creator")
+        sources: List[Any] = list(entry.get("author") or [])
+        if isinstance(creator, dict):
+            sources += list(creator.get("author") or [])
+        elif creator:
+            sources.append({"authname": creator})
+
+        names: List[str] = []
+        for item in sources:
+            if not isinstance(item, dict):
+                continue
+            name = ScopusProvider._author_name(item)
+            if name and name not in names:
                 names.append(name)
-        if not names:
-            creator = entry.get("dc:creator")
-            if creator:
-                names.append(creator)
         return names
 
     @staticmethod
@@ -128,11 +149,25 @@ class ScopusProvider(ProviderBase):
             return f"abstract/doi/{doi}"
         return None
 
+    async def _fetch_abstract(self, url: str) -> Dict[str, Any]:
+        """Fetch an abstract record at the richest view the key can read.
+
+        ``view=FULL`` is the only view carrying the abstract text, but a key
+        without that entitlement answers HTTP 401. Ask for it first, then
+        degrade to the default view so callers still receive complete
+        metadata instead of a hard error; if the record itself is missing,
+        the second attempt's error is the one that surfaces.
+        """
+        try:
+            return await self._fetch_json(url, params={"view": "FULL"}, headers=self._headers())
+        except ProviderError:
+            return await self._fetch_json(url, headers=self._headers())
+
     async def get(self, identifier: str) -> Optional[Paper]:
         path = self._identifier_path(identifier)
         if not path:
             return None
-        data = await self._fetch_json(f"{SCOPUS_BASE}{path}", headers=self._headers())
+        data = await self._fetch_abstract(f"{SCOPUS_BASE}{path}")
         core = (data.get("abstracts-retrieval-response") or {}).get("coredata") or {}
         return self._to_paper(core) if core else None
 

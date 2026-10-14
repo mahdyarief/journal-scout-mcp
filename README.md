@@ -20,8 +20,24 @@ SciVal: `scival_author_metrics`, `scival_institution_metrics`,
 `scival_author_lookup`, `scival_institution_lookup`, `scival_topic_metrics`.
 
 Every search accepts `offset` for pagination (uses each API's native
-parameter), and `search_author` fans out to the author-search-capable
-sources (Scopus, Crossref, OpenAlex) then merges and dedupes the results.
+parameter) and `year_from`/`year_to` bounds (native date filters where the
+source offers them). `search_author` fans out to every author-search-capable
+source — Scopus, Crossref, OpenAlex, arXiv, and Semantic Scholar — then merges
+and dedupes the results.
+
+`get_abstract_details` requests the full Scopus view first and falls back to
+the metadata-only view when the key lacks the abstract entitlement, so it
+degrades to complete metadata instead of erroring on a metadata-only key.
+
+## Prompts
+
+The server also exposes MCP prompt templates (`list_prompts` / `get_prompt`):
+
+- `literature_review` — topic plus optional `year_from`/`year_to`.
+- `author_overview` — an author name.
+- `citation_trace` — a paper identifier.
+
+Each renders a ready-to-run plan that drives the tools above.
 
 ## Requirements
 
@@ -121,9 +137,9 @@ Point the client at the module:
 .venv/bin/python -m pytest tests/ -q
 ```
 
-111 tests covering all providers, the HTTP retry/cache layer, dedup/merge
-logic (DOI-first with title/author fallback), pagination, author search,
-and the server tool registry.
+129 tests covering all providers, the HTTP retry/cache layer, dedup/merge
+logic (DOI-first with title/author fallback), pagination, year filters,
+author search, prompt templates, and the server tool registry.
 
 ## License
 

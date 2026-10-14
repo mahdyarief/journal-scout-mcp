@@ -48,6 +48,7 @@ def _valid_arxiv_id(identifier: str) -> str:
 class ArxivProvider(ProviderBase):
     name = "arxiv"
     supports_search = True
+    supports_author_search = True
 
     @staticmethod
     def _to_paper(entry):
@@ -74,11 +75,12 @@ class ArxivProvider(ProviderBase):
             ids={"arxiv": aid} if aid else {},
         )
 
-    async def search(self, query: str, limit: int, year_from=None, year_to=None, tech_only=False, offset: int = 0) -> List[Paper]:
-        search_query = f"all:{query}"
-        if tech_only:
-            cats = " OR ".join(f"cat:{c}" for c in TECH_CATEGORIES)
-            search_query = f"({search_query}) AND ({cats})"
+    async def _query(self, search_query: str, limit: int, offset: int, year_from, year_to) -> List[Paper]:
+        """Run one arXiv query and post-filter by year.
+
+        arXiv has no server-side date filter, so the year bounds are applied
+        to the parsed entries — shared by ``search`` and ``search_author``.
+        """
         params = {
             "search_query": search_query,
             "start": offset,
@@ -97,6 +99,16 @@ class ArxivProvider(ProviderBase):
                 continue
             results.append(paper)
         return results
+
+    async def search(self, query: str, limit: int, year_from=None, year_to=None, tech_only=False, offset: int = 0) -> List[Paper]:
+        search_query = f"all:{query}"
+        if tech_only:
+            cats = " OR ".join(f"cat:{c}" for c in TECH_CATEGORIES)
+            search_query = f"({search_query}) AND ({cats})"
+        return await self._query(search_query, limit, offset, year_from, year_to)
+
+    async def search_author(self, author: str, limit: int, year_from=None, year_to=None, offset: int = 0) -> List[Paper]:
+        return await self._query(f'au:"{author}"', limit, offset, year_from, year_to)
 
     async def get(self, identifier: str) -> Optional[Paper]:
         aid = _valid_arxiv_id(identifier)
