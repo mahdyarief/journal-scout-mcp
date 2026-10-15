@@ -93,7 +93,7 @@ def _tool_list() -> List[types.Tool]:
         ),
         types.Tool(
             name="search_author",
-            description="Find one author's papers across every author-search-capable source (Scopus/Crossref/OpenAlex), merged and deduped.",
+            description="Find one author's papers across every author-search-capable source (Scopus/Crossref/OpenAlex/arXiv/Semantic Scholar), merged and deduped.",
             inputSchema={
                 "type": "object",
                 "properties": {
