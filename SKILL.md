@@ -1,153 +1,74 @@
----
-name: journal-scout-mcp-user
-description: Use when using the journal-scout MCP for research.
----
-# Journal Scout MCP User Guide
+# journal-scout-mcp
 
-This skill explains how to install, configure, and use the `journal-scout-mcp` MCP server.
+Multi-source journal research **MCP server** for Anthropic Claude. Searches
+Scopus, arXiv, OpenAlex, Semantic Scholar, Crossref, PubMed, DBLP, and
+Unpaywall, then merges duplicate results into one entry per paper (DOI-first
+dedup) and reports partial failures. Citation links additionally come from
+OpenCitations (free, no key) for any known DOI.
 
-## Installation
+This is a **Claude skill** for using the `journal-scout-mcp` MCP server.
+Configure the MCP server in your Claude Code/plugin setup, then invoke any
+of the available tools.
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/mahdyarief/journal-scout-mcp.git
-   cd journal-scout-mcp
+## Setup
+
+1. **Install the MCP server** in your Claude config (`~/.claude.json` or
+   equivalent). The server runs from the `journal-scout-mcp` repo as an
+   MCP plugin:
+
+   ```json
+   {
+     "journal-scout-mcp": {
+       "command": "uv",
+       "args": ["--directory", "${CLAUDE_PLUGIN_ROOT}", "run", "python", "-m", "josc.server"]
+     }
+   }
    ```
-2. Create a virtual environment and install:
-   ```bash
-   python -m venv .venv
-   .venv\Scripts\pip install -e .  # Windows
-   # or
-   source .venv/bin/pip install -e .  # Unix
-   ```
-3. Copy `config.json.example` to `config.json` and fill in your Elsevier API key (required for Scopus/SciVal tools).
 
-## Configuration
+2. **Configure credentials** — copy `config.json.example` to `config.json`.
+   Only the Elsevier `api_key` (Scopus) is required; all other sources work
+   without a key. `polite_email` improves rate limits on OpenAlex, Crossref,
+   and Unpaywall.
 
-The `config.json` file (git-ignored) should contain:
-```json
-{
-  "api_key": "YOUR_ELSEVIER_API_KEY",
-  "semantic_scholar_api_key": "",
-  "polite_email": "you@example.com",
-  "cache_ttl": 300
-}
-```
-- `api_key`: Required for Scopus and SciVal tools (free tier available).
-- `semantic_scholar_api_key`: Optional, for higher rate limits.
-- `polite_email`: Used by OpenAlex, Crossref, and Unpaywall to improve rate limits.
-- `cache_ttl`: Seconds to cache API responses (default 300). Set to 0 to disable.
+3. **Enable** the plugin in your Claude session. The tool list includes:
 
-## Running the MCP Server
+   - **Unified:** `search_all`, `search_author`, `get_paper`, `get_citations`,
+     `get_references`, `build_citation_network`, `compute_metrics`,
+     `export_results`
+   - **Per-source:** `search_scopus`, `search_arxiv`, `search_openalex`,
+     `search_semanticscholar`, `search_crossref`, `search_pubmed`,
+     `search_dblp`
+   - **Scopus detail:** `get_abstract_details`, `get_author_profile`,
+     `get_quota_status`
+   - **SciVal:** `scival_author_metrics`,
+     `scival_institution_metrics`, `scival_author_lookup`,
+     `scival_institution_lookup`, `scival_topic_metrics`
 
-Start the server with:
-```bash
-python -m journal_scout_mcp.server
-```
+4. **Restart** Claude / plugin if the tool list does not reload.
 
-Or via the installed console script:
-```bash
-journal-scout-mcp
-```
+## When to use
 
-## Available Tools
+- **Literature review** — `search_all` or per-source searches to gather
+  papers on a topic.
+- **Author / affiliation research** — `search_author`,
+  `get_author_profile`, SciVal metrics.
+- **Paper lookup** — `get_paper` by DOI/arXiv ID.
+- **Citation network** — `get_citations` / `get_references`; OpenCitations
+  fills links for DOIs the other providers miss.
+- **Open-access check** — Unpaywall via `get_paper` / `get_citations`.
+- **Bibliography export** — `export_results(papers, format)` for BibTeX, RIS,
+  EndNote, WoS, CSV, or APA/Chicago/Harvard/Vancouver citations.
 
-The server provides 18 tools for searching and retrieving journal metadata:
+## Usage examples
 
-### Unified Search
-- `search_all`: Search all sources in parallel, merge duplicates.
-- `search_author`: Search for authors across sources (Scopus, Crossref, OpenAlex, arXiv, Semantic Scholar).
-- `get_paper`: Resolve a DOI/arXiv/Scopus/OpenAlex ID across sources.
-- `get_citations`: Collect cross-source citation graph (Scopus + OpenAlex).
-
-### Per-Source Search
-- `search_scopus`, `search_arxiv`, `search_openalex`, `search_semanticscholar`, `search_crossref`, `search_dblp` (Unpaywall hanya diakses via `get_paper` / DOI, tidak menyediakan tool search tersendiri).
-
-### Scopus Detail Tools
-- `get_abstract_details`: Get abstract and metadata for a Scopus ID. Tries `view=FULL` first, falls back to metadata-only view if the key lacks entitlement.
-- `get_author_profile`: Get author profile (h-index, document count, etc.).
-- `get_quota_status`: Check remaining API quota for the day.
-
-### SciVal Tools
-- `scival_author_metrics`, `scival_author_lookup`
-- `scival_institution_metrics`, `scival_institution_lookup`
-- `scival_topic_metrics`
-
-## MCP Prompts
-
-The server also exposes three prompt templates:
-
-- `literature_review`: Generate a literature review plan on a topic, optional year bounds.
-- `author_overview`: Generate an author overview plan.
-- `citation_trace`: Generate a citation tracing plan for a paper.
-
-Use via:
-- `list_prompts` to see available prompts.
-- `get_prompt` with prompt name and arguments to get the rendered plan.
-
-## Usage Examples
-
-### Search for a paper by DOI
-
-```python
-# Pseudocode for MCP client
-result = await mcp.call_tool(
-    "journal-scout",
-    "get_paper",
-    {"identifier": "10.1109/5.771073"}
-)
-```
-
-### Search for articles by author
-
-```python
-result = await mcp.call_tool(
-    "journal-scout",
-    "search_author",
-    {"author": "Geoffrey Hinton", "year_from": 2010, "year_to": 2020}
-)
-```
-
-### Get abstract (with graceful degradation)
-
-```python
-result = await mcp.call_tool(
-    "journal-scout",
-    "get_abstract_details",
-    {"scopus_id": "105048092271"}
-)
-# If your key lacks abstract entitlement, you still get metadata.
-```
-
-### Use a prompt
-
-```python
-prompt = await mcp.call_tool(
-    "journal-scout",
-    "get_prompt",
-    {
-        "name": "literature_review",
-        "arguments": {
-            "topic": "transformer architectures",
-            "year_from": "2018",
-            "year_to": "2023"
-        }
-    }
-)
-print(prompt.content)
-```
+- Find papers by an author: `search_author(name="Zaizhang Wu")`
+- Search papers by keyword: `search_all(query="deep learning")`
+- Get abstract details for a Scopus ID: `get_abstract_details(scopus_id="27624627907")`
 
 ## Notes
 
-- The `get_abstract_details` tool now degrades gracefully: if your API key does not include entitlement to the abstract (`view=FULL`), it returns complete metadata instead of erroring.
-- Author search works across five sources: Scopus, Crossref, OpenAlex, arXiv, and Semantic Scholar.
-- All tools support pagination via `offset` where applicable.
-- The server includes retry logic for HTTP 429, 406 (arXiv), and non-JSON responses (bot challenges).
-
-## Troubleshooting
-
-- **Tool returns `abstract=null` or empty**: Your Elsevier key likely lacks entitlement to fetch abstracts. The tool is working correctly—it returns metadata and will return the abstract if you upgrade your key.
-- **Rate limit errors (429)**: Increase `polite_email` (for OpenAlex/Crossref/Unpaywall) or wait; the server includes retry and caching.
-- **SSL certificate issues**: Ensure your system's CA certificates are up to date, especially in corporate environments.
-
----
+- Scopus `view=FULL` is degraded gracefully (falls back to abstract snippet)
+  when entitlement is missing.
+- DBLP may be blocked by a bot challenge from some IPs — treat results as
+  partial.
+- All network errors are reported as partial failures in `search_all` results.

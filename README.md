@@ -1,146 +1,123 @@
 # journal-scout-mcp
 
 Multi-source journal research MCP server. Searches Scopus, arXiv, OpenAlex,
-Semantic Scholar, Crossref, DBLP, and Unpaywall in parallel, then merges
-duplicate results into one entry per paper (DOI-first dedup) and reports
-partial failures. Includes SciVal author/institution/topic metrics.
+Semantic Scholar, Crossref, PubMed, DBLP, and Unpaywall, then merges duplicate
+results into one entry per paper (DOI-first dedup) and reports partial failures.
 
-Built as a companion to browser-based scraping: use this server to *find and
-verify* papers at scale (metadata, abstracts, open-access links, citation
-graphs), then drive a real browser (e.g. FastMCP Browser) only for the pages
-that block plain HTTP — WAFs, login walls, JS-heavy publishers.
+It also builds Connected-Papers-style citation networks (direct citations,
+bibliographic coupling, co-citation) and computes Publish-or-Perish style
+bibliometrics, and ships a browser UI (`josc-web`).
 
-## Tools (18)
+Citation links come from OpenCitations as well: 300M+ DOI-to-DOI links, free,
+no API key, no approval. It is not a searchable source — it only answers
+citation and reference queries for a known DOI or OpenCitations id.
 
-Unified: `search_all`, `search_author`, `get_paper`, `get_citations`.
-Per-source: `search_scopus`, `search_arxiv`, `search_openalex`,
-`search_semanticscholar`, `search_crossref`, `search_dblp`.
-Scopus detail: `get_abstract_details`, `get_author_profile`, `get_quota_status`.
-SciVal: `scival_author_metrics`, `scival_institution_metrics`,
-`scival_author_lookup`, `scival_institution_lookup`, `scival_topic_metrics`.
+## Tools (23)
 
-Every search accepts `offset` for pagination (uses each API's native
-parameter) and `year_from`/`year_to` bounds (native date filters where the
-source offers them). `search_author` fans out to every author-search-capable
-source — Scopus, Crossref, OpenAlex, arXiv, and Semantic Scholar — then merges
-and dedupes the results.
+| Unified | Per-source | Scopus detail |
+|---|---|---|
+| `search_all` | `search_scopus` | `get_abstract_details` |
+| `search_author` | `search_arxiv` | `get_author_profile` |
+| `get_paper` | `search_openalex` | `get_quota_status` |
+| `get_citations` | `search_semanticscholar` | SciVal |
+| `get_references` | `search_crossref` | `scival_author_metrics` |
+| `build_citation_network` | `search_pubmed` | `scival_institution_metrics` |
+| `compute_metrics` | `search_dblp` | `scival_author_lookup` |
+| `export_results` | | `scival_institution_lookup` |
+| | | `scival_topic_metrics` |
 
-`get_abstract_details` requests the full Scopus view first and falls back to
-the metadata-only view when the key lacks the abstract entitlement, so it
-degrades to complete metadata instead of erroring on a metadata-only key.
+### Export
 
-## Prompts
+`export_results` renders any list of paper dicts in one of 11 formats:
+`apa`, `bibtex`, `chicago`, `csv`, `csv_header`, `endnote`, `harvard`, `isi`,
+`json`, `ris`, `vancouver`. The same engine is exposed over HTTP as
+`POST /api/export`.
 
-The server also exposes MCP prompt templates (`list_prompts` / `get_prompt`):
+### Citation networks
 
-- `literature_review` — topic plus optional `year_from`/`year_to`.
-- `author_overview` — an author name.
-- `citation_trace` — a paper identifier.
+`build_citation_network` resolves the seed paper, fetches its references and
+citing papers from every capable source, then fetches the reference lists of
+the top citing papers to derive three edge types:
 
-Each renders a ready-to-run plan that drives the tools above.
+| Edge | Meaning |
+|---|---|
+| `cites` | Direct citation (seed → reference, citing paper → seed) |
+| `coupled` | Bibliographic coupling: references shared with the seed |
+| `cocited` | Co-citation: reference pairs appearing together in citing papers |
 
-## Requirements
+Pass `graph_format="graphml"` to get a Gephi/VOSviewer file instead of JSON.
 
-- Python 3.10+
-- An Elsevier/Scopus API key for Scopus/SciVal tools (free tier available
-  under 5,000 requests/year); all other sources are keyless.
+`get_references` exposes just the merged reference list of one paper.
 
-## Install
+Providers that answer citation queries: OpenAlex, Semantic Scholar, Crossref
+and OpenCitations. OpenCitations adds links the others miss (and vice versa),
+and its metadata is resolved through the OpenCitations Meta API with a
+Crossref batch fallback, so a paper is returned even when one of the two
+cannot describe it.
 
-```bash
-git clone https://github.com/mahdyarief/journal-scout-mcp.git
-cd journal-scout-mcp
-python -m venv .venv
-.venv/bin/pip install -e .
-```
+### Metrics
 
-On Windows the venv interpreter is `.venv\Scripts\python.exe`.
+`compute_metrics` accepts either `author` or `query` and returns papers, total
+citations, h-index, i10-index, g-index, max/mean citations, and citation
+velocity over the merged multi-source result set. `mode="extended"` adds the
+Publish-or-Perish indices: `hc_index`, `hI_index` (Batista), `hI_norm`,
+`hm_index` (Schreiber), `AWCR`, `AW_index`, `AWCRpA`, plus citation ratios.
 
 ## Config
 
-Copy `config.json.example` to `config.json`:
+Copy `config.json.example` to `config.json`. Only the Elsevier `api_key` is
+required; the other sources work without a key. `semantic_scholar_api_key`
+raises the Semantic Scholar rate limit, and `polite_email` improves rate limits
+on OpenAlex, Crossref, and Unpaywall.
 
-```json
-{
-  "api_key": "YOUR_ELSEVIER_API_KEY",
-  "semantic_scholar_api_key": "",
-  "polite_email": "you@example.com",
-  "cache_ttl": 300
-}
-```
+## josc-web
 
-Only the Elsevier `api_key` is required (Scopus/SciVal only). The other
-sources work without a key. `polite_email` improves rate limits on OpenAlex,
-Crossref, and Unpaywall. `cache_ttl` (seconds, default `300`) serves repeated
-queries from an in-memory cache instead of re-hitting the upstream APIs;
-set it to `0` to disable caching.
-
-Environment variables override the file:
-
-- `SCOPUS_API_KEY` (or `api_key` in config.json)
-- `SEMANTIC_SCHOLAR_API_KEY`
-- `JOURNAL_SCOUT_EMAIL` (or `polite_email`)
-- `JOURNAL_SCOUT_CACHE_TTL` (or `cache_ttl`)
-
-`config.json` is intentionally git-ignored — never commit your real keys.
-
-## Run as an MCP server
+`web/` is a Vite + React 19 + TanStack Router + Tailwind 4 app that talks to a
+thin Starlette API (`src/josc/api.py`) over the same aggregator the MCP server
+uses.
 
 ```bash
-python -m journal_scout_mcp.server
+pip install -e ".[web]"
+
+cd web && npm install && npm run build && cd ..
+
+python -m josc.api        # serves the API and the built UI on :8793
 ```
 
-Or via the installed console script: `journal-scout-mcp`.
+For UI development, run `npm run dev` inside `web/` (Vite proxies `/api` to
+`127.0.0.1:8793`).
 
-### Register in Hermes Agent
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Provider list and capability flags |
+| `GET /api/search?query=` | Fan-out search |
+| `GET /api/search-author?author=` | Author search |
+| `GET /api/paper?identifier=` | Resolve one paper |
+| `GET /api/citations?identifier=` | Citing papers |
+| `GET /api/references?identifier=` | Reference list |
+| `GET /api/network?identifier=&format=json\|graphml` | Citation network |
+| `GET /api/metrics?author=\|query=&mode=basic\|extended` | Bibliometric summary |
+| `GET /api/export/graphml?identifier=` | GraphML download |
+| `POST /api/export` | Bibliography export (JSON body: `papers`, `format`) |
 
-Add to your profile `config.yaml` under `mcp_servers`:
+## Objectives
 
-```yaml
-mcp_servers:
-  journal-scout:
-    command: D:/path/to/journal-scout-mcp/.venv/Scripts/python.exe
-    args: ["-m", "journal_scout_mcp.server"]
-    env:
-      JOURNAL_SCOUT_EMAIL: "you@example.com"
-```
+- **Search** 7 scholarly databases from one MCP server, plus OpenCitations for
+  citation links on any DOI.
+- **Merge** duplicates by DOI-first dedup.
+- **Report** partial failures (per-source) so callers never get a 500 for one
+  blackholed API.
+- **Degrade** gracefully where entitlements are missing (e.g. Scopus `view=FULL`).
+- **Map** citation structure with coupling/co-citation and export it to GraphML.
 
-### Register in Claude Desktop / Claude Code
-
-Point the client at the module:
-
-```json
-{
-  "mcpServers": {
-    "journal-scout": {
-      "command": "<venv-python>",
-      "args": ["-m", "journal_scout_mcp.server"]
-    }
-  }
-}
-```
-
-## Rate-limit handling
-
-- Retries on HTTP 429 for all providers.
-- Retries on HTTP 406 for arXiv, which signals its per-IP rate limit with
-  406 instead of 429.
-- Non-JSON (HTML bot-challenge) responses raise a `ProviderError` naming the
-  provider and showing the HTML prefix, instead of a confusing JSON parse
-  error.
-- A shared TTL cache short-circuits duplicate queries per provider, so
-  retries and repeated searches do not burn the (limited) upstream quota.
-
-## Tests
+## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q
+uv venv
+uv pip install -e ".[dev]"
+pytest
 ```
-
-129 tests covering all providers, the HTTP retry/cache layer, dedup/merge
-logic (DOI-first with title/author fallback), pagination, year filters,
-author search, prompt templates, and the server tool registry.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See `LICENSE`.
