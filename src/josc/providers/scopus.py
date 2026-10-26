@@ -9,6 +9,19 @@ SCOPUS_BASE = "https://api.elsevier.com/content/"
 SCIVAL_BASE = "https://api.elsevier.com/analytics/scival/"
 _SCOPUS_ID_PREFIX = "SCOPUS_ID:"
 SCIVAL_METRIC_TYPES = "publications,citations,hIndex"
+MAX_PAGE_SIZE = 25
+
+_REF_ENTITLEMENT_MESSAGE = (
+    "Scopus API key lacks the view=REF entitlement, so reference lists cannot be "
+    "read. Enable the 'References' view in the Elsevier developer portal (or use "
+    "a key with Scopus subscriber access). Citation edges still work; only "
+    "reference edges are skipped."
+)
+
+
+def _is_authorization_error(error: ProviderError) -> bool:
+    message = getattr(error, "message", str(error))
+    return "AUTHORIZATION_ERROR" in message or "HTTP 401" in message
 
 
 class ScopusProvider(ProviderBase):
@@ -23,6 +36,10 @@ class ScopusProvider(ProviderBase):
     def __init__(self, fetcher, config=None):
         super().__init__(fetcher, config)
         self._api_key = (config or {}).get("api_key")
+        # Set once the key proves it cannot read ``view=REF``. Reference lookup
+        # runs once per citing paper and once per seed reference, so retrying a
+        # guaranteed 401 would burn the quota for nothing.
+        self._ref_entitlement_denied = False
 
     def _headers(self):
         key = self._api_key or get_api_key()
@@ -79,6 +96,20 @@ class ScopusProvider(ProviderBase):
         return names
 
     @staticmethod
+    def _is_open_access(entry):
+        """Scopus signals OA as ``openaccess: "1"`` or a boolean ``openaccessFlag``.
+
+        Absent both keys the answer is unknown, so return ``None`` rather than
+        claiming the paper is paywalled.
+        """
+        flag = entry.get("openaccess")
+        if flag is not None:
+            return str(flag).lower() in {"1", "true", "yes"}
+        if entry.get("openaccessFlag") is not None:
+            return bool(entry["openaccessFlag"])
+        return None
+
+    @staticmethod
     def _to_paper(entry):
         scopus_id = entry.get("dc:identifier") or entry.get("eid")
         doi = normalize_doi(entry.get("prism:doi") or entry.get("doi"))
@@ -99,6 +130,7 @@ class ScopusProvider(ProviderBase):
             type=entry.get("subtypeDescription"),
             sources=["scopus"],
             ids=ids,
+            is_open_access=ScopusProvider._is_open_access(entry),
         )
 
     @staticmethod
@@ -150,11 +182,20 @@ class ScopusProvider(ProviderBase):
         return query
 
     async def _search_query(self, query: str, limit: int, offset: int) -> List[Paper]:
-        params = {"query": query, "count": limit, "start": offset}
-        data = await self._fetch_json(
-            f"{SCOPUS_BASE}search/scopus", params=params, headers=self._headers()
-        )
-        return self._entries_to_papers(data)
+        # Scopus rejects ``count`` above the API key's service-level maximum
+        # (25 for the standard key), so a larger limit is fetched in windows.
+        papers: List[Paper] = []
+        while len(papers) < limit:
+            window = min(MAX_PAGE_SIZE, limit - len(papers))
+            params = {"query": query, "count": window, "start": offset + len(papers)}
+            data = await self._fetch_json(
+                f"{SCOPUS_BASE}search/scopus", params=params, headers=self._headers()
+            )
+            batch = self._entries_to_papers(data)
+            papers.extend(batch)
+            if len(batch) < window:
+                break
+        return papers[:limit]
 
     async def search(self, query: str, limit: int, year_from=None, year_to=None, tech_only=False, author=None, venue=None, offset: int = 0, affiliation=None, issn=None, orcid=None, doi=None) -> List[Paper]:
         if author:
@@ -267,14 +308,22 @@ class ScopusProvider(ProviderBase):
         return self._entries_to_papers(data)
 
     async def references(self, identifier: str, limit: int) -> List[Paper]:
+        if self._ref_entitlement_denied:
+            raise ProviderError(self.name, _REF_ENTITLEMENT_MESSAGE)
         path = self._identifier_path(identifier)
         if not path:
             return []
-        data = await self._fetch_json(
-            f"{SCOPUS_BASE}{path}",
-            params={"view": "REF", "httpAccept": "application/json"},
-            headers=self._headers(),
-        )
+        try:
+            data = await self._fetch_json(
+                f"{SCOPUS_BASE}{path}",
+                params={"view": "REF", "httpAccept": "application/json"},
+                headers=self._headers(),
+            )
+        except ProviderError as exc:
+            if not _is_authorization_error(exc):
+                raise
+            self._ref_entitlement_denied = True
+            raise ProviderError(self.name, _REF_ENTITLEMENT_MESSAGE) from exc
         entries = ((data.get("abstracts-retrieval-response") or {}).get("references") or {}).get("reference") or []
         papers = [
             self._to_reference_paper(e)

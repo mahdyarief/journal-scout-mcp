@@ -34,6 +34,22 @@ PoP8Setup.exe (PE32 x86, 3.1 MB, SHA-256 0747a558…)
 Catatan: `lzma.decompress()` menolak stream ini karena tidak ada end-marker.
 Pakai `lzma.LZMADecompressor(format=FORMAT_RAW, ...)`.
 
+## Gap yang masih tersisa di journal-scout
+
+Diperbarui 2026-10-25. Semua yang bisa ditutup tanpa dependensi eksternal sudah
+dikerjakan; sisa di bawah ini adalah batasan nyata, bukan pekerjaan tertunda.
+
+| Gap | Status | Alasan |
+|---|---|---|
+| Google Scholar | tidak diimplementasikan | tidak ada API resmi; butuh scraping/proxy, di luar roadmap |
+| Web of Science | tidak diimplementasikan | butuh langganan institusi |
+| Lens.org | tidak diimplementasikan | API butuh token; kandidat berikutnya jika dibutuhkan |
+| Field-tag query (`TS=`, `TI=`, `AU=`) | tidak diimplementasikan | `query.py` hanya membuang operator tak didukung, tidak menambah sintaks field |
+| `Uncheck 0 Cites` / `Uncheck CITATION results` | tidak diimplementasikan | spesifik hasil scraping Google Scholar |
+| Trash & folder berlapis | sengaja tidak ditiru | MCP server memakai daftar datar |
+| CAPTCHA, crash recovery | sengaja tidak ditiru | journal-scout memakai API resmi dan stateless |
+| Cache TTL per provider | belum ada | `GET /api/cache/info` hanya membaca, belum mengubah TTL |
+
 ## Verdict signature
 
 Signer **Tarma Software Research Ltd**, Sectigo EV, valid 2024-01-11 s/d

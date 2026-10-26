@@ -1,8 +1,8 @@
 # Dokumentasi Referensi journal-scout
 
 Basis pengetahuan untuk pengembangan jangka panjang `journal-scout-mcp`.
-Dibagi dua: referensi hasil reverse engineering aplikasi **Harzing's Publish
-or Perish 8** (`pop8/`) dan dokumentasi kondisi serta rencana pengembangan
+Dibagi dua: referensi hasil reverse engineering **Harzing's Publish or
+Perish 8** (`pop8/`) dan dokumentasi kondisi serta rencana pengembangan
 journal-scout sendiri (`journal-scout/`).
 
 ## Struktur
@@ -29,7 +29,6 @@ journal-scout sendiri (`journal-scout/`).
 
 ## Metadata sumber
 
-- Binary: `C:\Users\Lenovo\Downloads\PoP8Setup.exe`
-- Versi PoP: **8.19.5300.9483**
-- Metode ekstraksi: PE resource parsing (`RT_MENU`, `RT_STRING`, `RT_DIALOG`)
-  dan string mining dari `pop8win.exe` (PE yang di-carve dari arsip `tzf3`).
+- PoP8: `PoP8Setup.exe`, versi **8.19.5300.9483**. Metode: PE resource
+  parsing (`RT_MENU`, `RT_STRING`, `RT_DIALOG`) dan string mining dari
+  `pop8win.exe` (PE yang di-carve dari arsip `tzf3`).

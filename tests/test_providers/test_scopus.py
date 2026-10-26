@@ -5,6 +5,7 @@ from urllib.parse import unquote
 import httpx
 
 from josc.http import Fetcher
+from josc.models import ProviderError
 from josc.providers.scopus import ScopusProvider
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -30,6 +31,37 @@ async def test_search_maps_entries_to_paper(monkeypatch):
         assert p.venue == "IEEE Access"
         assert p.sources == ["scopus"]
         assert p.ids["scopus"] == "SCOPUS_ID:85012345678"
+    finally:
+        await client.aclose()
+
+
+async def test_search_parses_open_access_and_author_count():
+    # Scopus search entries already carry ``openaccess`` and ``author-count``;
+    # they were ignored, so the UI could not show OA status for Scopus hits.
+    payload = {
+        "search-results": {
+            "entry": [
+                {
+                    "dc:identifier": "SCOPUS_ID:1",
+                    "dc:title": "Paper",
+                    "prism:doi": "10.1/x",
+                    "openaccess": "1",
+                    "openaccessFlag": True,
+                    "author-count": "3",
+                    "subtypeDescription": "Article",
+                }
+            ]
+        }
+    }
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ScopusProvider(client, {"api_key": "test-key"})
+    try:
+        paper = (await provider.search("paper", 5))[0]
+        assert paper.is_open_access is True
     finally:
         await client.aclose()
 
@@ -328,5 +360,95 @@ async def test_search_author_keeps_full_name_inside_auth_clause():
     try:
         await provider.search_author("Harzing, Anne-Wil", 5)
         assert captured["query"] == "AUTH(Harzing, Anne-Wil)"
+    finally:
+        await client.aclose()
+
+
+async def test_references_reports_missing_ref_entitlement_clearly():
+    # A key without the ``view=REF`` entitlement answers 401 with a raw
+    # service-error body. The graph UI shows that string verbatim, so it has to
+    # become an actionable sentence instead of an HTTP dump.
+    def handler(request):
+        return httpx.Response(
+            401,
+            json={
+                "service-error": {
+                    "status": {
+                        "statusCode": "AUTHORIZATION_ERROR",
+                        "statusText": "The requestor is not authorized to access "
+                        "the requested view or fields of the resource",
+                    }
+                }
+            },
+        )
+
+    fetcher = Fetcher(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), cache=None
+    )
+    provider = ScopusProvider(fetcher, {"api_key": "test-key"})
+    try:
+        try:
+            await provider.references("10.1/x", 5)
+        except ProviderError as exc:
+            message = exc.message
+        else:
+            raise AssertionError("expected ProviderError")
+        assert "view=REF" in message
+        assert "entitlement" in message.lower()
+        assert "service-error" not in message
+        assert "AUTHORIZATION_ERROR" not in message
+    finally:
+        await fetcher.close()
+
+
+async def test_references_stops_retrying_after_entitlement_failure():
+    # A citation graph calls references() once per citing paper and once per
+    # seed reference. Once the key is known to lack view=REF, every further
+    # call must fail locally instead of burning the quota on a guaranteed 401.
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            401,
+            json={"service-error": {"status": {"statusCode": "AUTHORIZATION_ERROR"}}},
+        )
+
+    fetcher = Fetcher(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), cache=None
+    )
+    provider = ScopusProvider(fetcher, {"api_key": "test-key"})
+    try:
+        for _ in range(3):
+            try:
+                await provider.references("10.1/x", 5)
+            except ProviderError:
+                pass
+        assert len(calls) == 1
+    finally:
+        await fetcher.close()
+
+
+async def test_search_paginates_in_chunks_of_25():
+    # The API key's service level rejects count > 25, so a larger limit has
+    # to be split into successive ``start`` windows.
+    calls = []
+
+    def handler(request):
+        start = int(request.url.params.get("start") or 0)
+        count = int(request.url.params.get("count") or 0)
+        calls.append((start, count))
+        entries = [
+            {"dc:identifier": f"SCOPUS_ID:{start + i}", "dc:title": f"Paper {start + i}"}
+            for i in range(count)
+        ]
+        return httpx.Response(200, json={"search-results": {"entry": entries}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ScopusProvider(client, {"api_key": "test-key"})
+    try:
+        papers = await provider.search("networks", 60)
+        assert calls == [(0, 25), (25, 25), (50, 10)]
+        assert len(papers) == 60
     finally:
         await client.aclose()

@@ -146,3 +146,90 @@ async def test_empty_idlist_returns_empty(make_fetcher):
         assert await provider.search("nothing matches", 5) == []
     finally:
         await fetcher.close()
+
+
+PLACEHOLDER_TITLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>999</PMID>
+      <Article>
+        <ArticleTitle>[Not Available].</ArticleTitle>
+        <VernacularTitle>Utilisation des données probantes</VernacularTitle>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2024</Year>
+            </PubDate>
+          </JournalIssue>
+          <Title>Revue Example</Title>
+        </Journal>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
+MESH_AND_KEYWORD_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>777</PMID>
+      <Article>
+        <ArticleTitle>Data quality in practice</ArticleTitle>
+        <Journal>
+          <JournalIssue>
+            <PubDate><Year>2022</Year></PubDate>
+          </JournalIssue>
+          <Title>Journal of Data</Title>
+        </Journal>
+        <PublicationTypeList>
+          <PublicationType>Review</PublicationType>
+          <PublicationType>Journal Article</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName>Data Accuracy</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName>Information Storage and Retrieval</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+      <KeywordList>
+        <Keyword>governance</Keyword>
+        <Keyword>provenance</Keyword>
+      </KeywordList>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
+async def test_search_parses_mesh_keywords_and_publication_types(make_fetcher):
+    # PubMed ships MeSH headings, author keywords and publication types in the
+    # same XML response; they were being thrown away.
+    fetcher = make_fetcher(
+        _router({"esearchresult": {"idlist": ["777"]}}, efetch_xml=MESH_AND_KEYWORD_XML)
+    )
+    provider = PubMedProvider(fetcher)
+    try:
+        paper = (await provider.search("data quality", 5))[0]
+        assert paper.keywords == ["governance", "provenance"]
+        assert paper.topics == ["Data Accuracy", "Information Storage and Retrieval"]
+        assert "Review" in paper.publication_types
+    finally:
+        await fetcher.close()
+
+
+async def test_search_falls_back_to_vernacular_title(make_fetcher):
+    fetcher = make_fetcher(
+        _router({"esearchresult": {"idlist": ["999"]}}, efetch_xml=PLACEHOLDER_TITLE_XML)
+    )
+    provider = PubMedProvider(fetcher)
+    try:
+        papers = await provider.search("data quality", 5)
+        assert papers[0].title == "Utilisation des données probantes"
+    finally:
+        await fetcher.close()

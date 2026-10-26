@@ -1,10 +1,12 @@
 import asyncio
+import re
 from typing import Any, Dict, List, Optional
 
 from .graph import _node_id, build_network, compute_metrics as _compute_metrics
 from .merge import merge_papers
 from .models import Paper, ProviderError
 from .providers.base import ProviderBase
+from .query import operator_report, translate_query
 
 
 async def _gather(
@@ -61,6 +63,7 @@ def _select(providers: List[ProviderBase], sources: Optional[List[str]], capabil
         for provider in providers
         if (sources is None or provider.name in sources)
         and getattr(provider, capability, False)
+        and (sources is not None or not getattr(provider, "opt_out", False))
     ]
 
 
@@ -111,6 +114,78 @@ def _filter_kwargs(provider: ProviderBase, requested: Dict[str, Any]) -> Dict[st
     }
 
 
+_SORT_FIELDS = {"citations": "citation_count", "year": "year", "title": "title"}
+
+# Boolean tokens carry no topical meaning, so they must not earn relevance.
+_OPERATOR_TOKENS = {"and", "or", "not"}
+
+
+def _query_tokens(query: str) -> List[str]:
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", (query or "").lower())
+        if token not in _OPERATOR_TOKENS
+    ]
+
+
+def _relevance_score(item: Dict[str, Any], tokens: List[str]) -> int:
+    """Title matches outweigh abstract matches; each token counts once."""
+    title = (item.get("title") or "").lower()
+    abstract = (item.get("abstract") or "").lower()
+    score = 0
+    for token in tokens:
+        if token in title:
+            score += 3
+        elif token in abstract:
+            score += 1
+    return score
+
+
+def _filter_by_topic(
+    results: List[Dict[str, Any]], topic: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Keep records whose ``topics`` contain ``topic`` as a case-insensitive substring.
+
+    Topic vocabularies are provider-specific (OpenAlex concepts, Crossref
+    subjects, PubMed MeSH), so there is no shared query parameter to push
+    down. Filtering the merged set keeps it a single pass with no extra
+    network requests.
+    """
+    needle = (topic or "").strip().lower()
+    if not needle:
+        return results
+    return [
+        item
+        for item in results
+        if any(needle in (value or "").lower() for value in item.get("topics") or [])
+    ]
+
+
+def _sort_results(
+    results: List[Dict[str, Any]],
+    sort: Optional[str],
+    order: str,
+    query: str = "",
+) -> None:
+    """Sort paper dicts in place; records missing the key always come last."""
+    if sort == "relevance":
+        tokens = _query_tokens(query)
+        if not tokens:
+            return
+        results.sort(
+            key=lambda item: _relevance_score(item, tokens),
+            reverse=order != "asc",
+        )
+        return
+    field = _SORT_FIELDS.get(sort or "")
+    if not field:
+        return
+    present = [item for item in results if item.get(field) is not None]
+    missing = [item for item in results if item.get(field) is None]
+    present.sort(key=lambda item: item[field], reverse=order != "asc")
+    results[:] = present + missing
+
+
 async def search_all(
     providers: List[ProviderBase],
     query: str,
@@ -126,14 +201,18 @@ async def search_all(
     issn: Optional[str] = None,
     orcid: Optional[str] = None,
     doi: Optional[str] = None,
+    sort: Optional[str] = None,
+    order: str = "desc",
+    topic: Optional[str] = None,
 ) -> Dict[str, Any]:
     active = _select(providers, sources, "supports_search")
+    translated = {p.name: translate_query(query, p.name) for p in active}
     requested = {"author": author, "venue": venue, "affiliation": affiliation,
                  "issn": issn, "orcid": orcid, "doi": doi}
     applied, ignored = _route_filters(active, requested, tech_only=tech_only)
     calls = {
         p.name: p.search(
-            query=query,
+            query=translated[p.name],
             limit=limit_per_source,
             year_from=year_from,
             year_to=year_to,
@@ -143,7 +222,13 @@ async def search_all(
         )
         for p in active
     }
-    return await _fan_out(calls, {"applied": applied, "ignored": ignored})
+    result = await _fan_out(calls, {"applied": applied, "ignored": ignored})
+    result["results"] = _filter_by_topic(result["results"], topic)
+    _sort_results(result["results"], sort, order, query)
+    report = operator_report([p.name for p in active], query)
+    result["query_warnings"] = report["warnings"]
+    result["query_translated"] = translated
+    return result
 
 
 async def search_author(
@@ -201,8 +286,24 @@ async def _enrich(providers: List[ProviderBase], paper: Paper) -> Paper:
     return paper
 
 
-async def get_paper(providers: List[ProviderBase], identifier: str) -> Dict[str, Any]:
-    active = [p for p in providers if not p.enricher]
+async def get_paper(
+    providers: List[ProviderBase],
+    identifier: str,
+    sources: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Resolve one identifier across providers.
+
+    ``sources`` narrows the lookup when the identifier is only meaningful to
+    one provider. A bare numeric id is ambiguous — Semantic Scholar reads any
+    digits as a ``CorpusId``, PubMed as a PMID, Scopus as a Scopus id — so a
+    caller holding a Garuda document id must say so instead of letting every
+    other source guess.
+    """
+    active = [
+        p
+        for p in providers
+        if not p.enricher and (sources is None or p.name in sources)
+    ]
     calls = {p.name: p.get(identifier) for p in active}
     names = list(calls.keys())
     outcomes = await asyncio.gather(*calls.values(), return_exceptions=True)
@@ -224,8 +325,15 @@ async def get_citations(
     providers: List[ProviderBase],
     identifier: str,
     limit: int = 20,
+    sources: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    active = _select(providers, None, "supports_citations")
+    """Collect citing papers for one identifier.
+
+    ``sources`` mirrors :func:`get_paper`: a bare numeric id only means
+    something to the provider that issued it, so callers holding a Garuda or
+    PubMed id must scope the lookup instead of letting every provider guess.
+    """
+    active = _select(providers, sources, "supports_citations")
     calls = {p.name: p.citations(identifier, limit) for p in active}
     return await _fan_out(calls)
 
@@ -234,9 +342,10 @@ async def get_references(
     providers: List[ProviderBase],
     identifier: str,
     limit: int = 20,
+    sources: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Collect the reference list of one paper from every capable source."""
-    active = _select(providers, None, "supports_references")
+    active = _select(providers, sources, "supports_references")
     calls = {p.name: p.references(identifier, limit) for p in active}
     return await _fan_out(calls)
 
@@ -245,9 +354,10 @@ async def get_related(
     providers: List[ProviderBase],
     identifier: str,
     limit: int = 20,
+    sources: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Collect the related-works list of one paper from every capable source."""
-    active = _select(providers, None, "supports_related")
+    active = _select(providers, sources, "supports_related")
     calls = {p.name: p.related(identifier, limit) for p in active}
     return await _fan_out(calls)
 
@@ -288,12 +398,15 @@ async def build_citation_network(
     citing_limit: int = 10,
     max_nodes: int = 200,
     graph_format: str = "json",
+    reference_limit: int = 10,
 ) -> Dict[str, Any]:
     """Build a Connected-Papers-style network around one paper.
 
     Besides the seed's own references and citing papers, the reference lists
     of the top ``citing_limit`` citing papers are fetched so co-citation and
-    bibliographic coupling edges can be derived.
+    bibliographic coupling edges can be derived. The references of the seed's
+    own references are fetched too (up to ``reference_limit``), which is what
+    produces citation paths that do not pass through the seed.
     """
     resolved = await get_paper(providers, identifier)
     if not resolved.get("paper"):
@@ -330,8 +443,35 @@ async def build_citation_network(
                 continue
             citing_references[citing_id] = outcome[0]
 
+    # Second hop: expand the seed's own references so citation paths can form
+    # between non-seed nodes instead of every edge pointing back at the seed.
+    ref_targets = []
+    for ref in references[:reference_limit]:
+        related = _relation_identifier(ref)
+        if related:
+            ref_targets.append((_node_id(ref), related))
+
+    reference_references: Dict[str, List[Paper]] = {}
+    if ref_targets:
+        outcomes = await asyncio.gather(
+            *[
+                _fetch_papers(providers, related, limit, "supports_references", "references")
+                for _, related in ref_targets
+            ],
+            return_exceptions=True,
+        )
+        for (ref_id, _), outcome in zip(ref_targets, outcomes):
+            if isinstance(outcome, Exception):
+                continue
+            reference_references[ref_id] = outcome[0]
+
     network = build_network(
-        seed, references, citations, citing_references, max_nodes=max_nodes
+        seed,
+        references,
+        citations,
+        citing_references,
+        max_nodes=max_nodes,
+        reference_references=reference_references,
     )
     network["seed_paper"] = seed.to_dict()
     network["errors"] = {**ref_errors, **cite_errors}
@@ -339,6 +479,7 @@ async def build_citation_network(
         "references": ref_counts,
         "citations": cite_counts,
         "citing_references": len(citing_references),
+        "reference_references": len(reference_references),
     }
 
     if graph_format == "graphml":

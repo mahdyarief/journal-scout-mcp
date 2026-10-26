@@ -11,11 +11,26 @@ EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 DEFAULT_TOOL = "journal-scout"
 
 
+_PLACEHOLDER_TITLES = frozenset(
+    {"[not available]", "not available", "n/a", "na", "none", "[no title]", "untitled"}
+)
+
+
 def _text(element) -> Optional[str]:
     if element is None:
         return None
     value = "".join(element.itertext()).strip()
     return value or None
+
+
+def _usable_title(value: Optional[str]) -> Optional[str]:
+    """Return ``value`` unless PubMed used it as an "[Not Available]" placeholder."""
+    if not value:
+        return None
+    text = value.strip()
+    if text.lower().rstrip(".").strip() in _PLACEHOLDER_TITLES:
+        return None
+    return text
 
 
 class PubMedProvider(ProviderBase):
@@ -93,7 +108,11 @@ class PubMedProvider(ProviderBase):
         if data is None:
             return None
 
-        title = _text(data.find("ArticleTitle")) or ""
+        # Records with no English title carry the placeholder "[Not Available]."
+        # in ArticleTitle and the real title in VernacularTitle.
+        title = _usable_title(_text(data.find("ArticleTitle")))
+        if not title:
+            title = _usable_title(_text(data.find("VernacularTitle"))) or ""
 
         abstract_parts = []
         for node in data.findall("Abstract/AbstractText"):
@@ -132,6 +151,25 @@ class PubMedProvider(ProviderBase):
         doi = normalize_doi(doi)
 
         ids = {"pubmed": pmid} if pmid else {}
+
+        mesh_topics = []
+        for heading in citation.findall("MeshHeadingList/MeshHeading"):
+            name = _text(heading.find("DescriptorName"))
+            if name and name not in mesh_topics:
+                mesh_topics.append(name)
+
+        keywords = []
+        for keyword in citation.findall("KeywordList/Keyword"):
+            value = _text(keyword)
+            if value and value not in keywords:
+                keywords.append(value)
+
+        publication_types = []
+        for publication_type in data.findall("PublicationTypeList/PublicationType"):
+            value = _text(publication_type)
+            if value and value not in publication_types:
+                publication_types.append(value)
+
         return Paper(
             doi=doi,
             title=title,
@@ -143,6 +181,9 @@ class PubMedProvider(ProviderBase):
             type="article",
             sources=["pubmed"],
             ids=ids,
+            topics=mesh_topics,
+            keywords=keywords,
+            publication_types=publication_types,
         )
 
     @classmethod
